@@ -1,0 +1,267 @@
+#define BLYNK_TEMPLATE_ID "TMPL6Z61onHpi"
+#define BLYNK_TEMPLATE_NAME "Quickstart Device"
+#define BLYNK_AUTH_TOKEN "nd_WPGyD5Z2DDB03cC9sYXzPlslBg7O7"
+#define BLYNK_PRINT Serial
+
+#include <WiFi.h>
+#include <WiFiClient.h>
+#include <Wire.h>
+#include <Adafruit_MPU6050.h>
+#include <Adafruit_Sensor.h>
+#include <ThingSpeak.h>
+#include <WiFiManager.h>
+#include <RTClib.h>
+#include <SD.h>
+#include <SPI.h>
+#include <math.h>
+#include <BlynkSimpleEsp32.h>
+#include <Adafruit_HTU21DF.h>
+
+// === Objek sensor dan modul ===
+Adafruit_MPU6050 mpu;
+RTC_DS3231 rtc;
+Adafruit_HTU21DF htu;
+WiFiClient client;
+BlynkTimer timer;
+
+// === Data ThingSpeak ===
+unsigned long myChannelNumber = 3081598;
+const char *myWriteAPIKey = "2ILAAKQFLBRVFWCQ";
+
+// === Variabel data ===
+float accX = 0, accY = 0, accZ = 0;
+float totalGetaran = 0;
+float htuTemp = 0, htuHum = 0;
+
+// === File SD ===
+File dataFile;
+bool sd_ok = false;
+bool rtc_ok = false;
+bool mpu_ok = false;
+bool htu_ok = false;
+
+// === LED indikator ===
+const int pinRed = 16;
+const int pinYellow = 17;
+const int pinGreen = 15;
+
+void initLED() {
+  pinMode(pinRed, OUTPUT);
+  pinMode(pinYellow, OUTPUT);
+  pinMode(pinGreen, OUTPUT);
+  digitalWrite(pinRed, LOW);
+  digitalWrite(pinYellow, LOW);
+  digitalWrite(pinGreen, LOW);
+}
+
+// === Fungsi indikator LED berkedip terus ===
+void updateIndicators() {
+  static unsigned long lastBlink = 0;
+  static bool blinkState = false;
+  unsigned long now = millis();
+
+  if (now - lastBlink >= 500) {
+    blinkState = !blinkState;
+    lastBlink = now;
+  }
+
+  if (sd_ok && rtc_ok && mpu_ok && htu_ok) {
+    digitalWrite(pinGreen, HIGH);
+    digitalWrite(pinRed, LOW);
+    digitalWrite(pinYellow, LOW);
+  } else {
+    digitalWrite(pinGreen, LOW);
+    if (!sd_ok || !rtc_ok) digitalWrite(pinRed, blinkState);
+    else digitalWrite(pinRed, LOW);
+
+    if (!mpu_ok || !htu_ok) digitalWrite(pinYellow, blinkState);
+    else digitalWrite(pinYellow, LOW);
+  }
+}
+
+// === Fungsi inisialisasi modul ===
+void initSD() {
+  Serial.print("Inisialisasi SD Card...");
+  if (!SD.begin(5)) {
+    Serial.println(" Gagal!");
+    sd_ok = false;
+  } else {
+    sd_ok = true;
+    Serial.println(" Berhasil!");
+    if (!SD.exists("/data_log.csv")) {
+      dataFile = SD.open("/data_log.csv", FILE_WRITE);
+      if (dataFile) {
+        dataFile.println("Tanggal,Waktu,AccX,AccY,AccZ,TotalGetaran,Temp,Hum");
+        dataFile.close();
+      }
+    }
+  }
+}
+
+void initRTC() {
+  if (!rtc.begin()) {
+    Serial.println("RTC tidak terdeteksi!");
+    rtc_ok = false;
+  } else {
+    rtc_ok = true;
+    Serial.println("RTC OK");
+  }
+}
+
+void initMPU() {
+  if (!mpu.begin(0x69)) {
+    Serial.println("MPU6050 tidak terdeteksi!");
+    mpu_ok = false;
+  } else {
+    mpu_ok = true;
+    mpu.setAccelerometerRange(MPU6050_RANGE_2_G);
+    mpu.setGyroRange(MPU6050_RANGE_250_DEG);
+    mpu.setFilterBandwidth(MPU6050_BAND_5_HZ);
+    Serial.println("MPU6050 OK");
+  }
+}
+
+void initHTU() {
+  if (!htu.begin()) {
+    Serial.println("HTU21D tidak terdeteksi!");
+    htu_ok = false;
+  } else {
+    htu_ok = true;
+    Serial.println("HTU21D OK");
+  }
+}
+
+// === Fungsi baca sensor ===
+void bacaSensor() {
+  if (mpu_ok) {
+    sensors_event_t a, g, temp;
+    mpu.getEvent(&a, &g, &temp);
+    accX = a.acceleration.x;
+    accY = a.acceleration.y;
+    accZ = a.acceleration.z;
+    totalGetaran = sqrt(accX * accX + accY * accY + accZ * accZ);
+  }
+
+  if (htu_ok) {
+    float t = htu.readTemperature();
+    float h = htu.readHumidity();
+    if (!isnan(t)) htuTemp = t;
+    if (!isnan(h)) htuHum = h;
+  }
+
+  DateTime now = rtc_ok ? rtc.now() : DateTime(2000,1,1,0,0,0);
+  char waktu[9];
+  sprintf(waktu, "%02d:%02d:%02d", now.hour(), now.minute(), now.second());
+
+  Serial.print("[" + String(waktu) + "] ");
+  Serial.print("AccX: "); Serial.print(accX, 3);
+  Serial.print(" | AccY: "); Serial.print(accY, 3);
+  Serial.print(" | AccZ: "); Serial.print(accZ, 3);
+  Serial.print(" | Total: "); Serial.print(totalGetaran, 3);
+  Serial.print(" | T: "); Serial.print(htuTemp, 2);
+  Serial.print("C H: "); Serial.println(htuHum, 2);
+}
+
+// === Fungsi kirim data ===
+void kirimThingSpeak() {
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  ThingSpeak.setField(1, accX);
+  ThingSpeak.setField(2, accY);
+  ThingSpeak.setField(3, accZ);
+  ThingSpeak.setField(4, totalGetaran);
+  ThingSpeak.setField(5, htuTemp);
+  ThingSpeak.setField(6, htuHum);
+  int x = ThingSpeak.writeFields(myChannelNumber, myWriteAPIKey);
+  if (x == 200) Serial.println("Data berhasil dikirim ke ThingSpeak!");
+  else Serial.print("Gagal kirim TS code: "), Serial.println(x);
+}
+
+void kirimBlynk() {
+  if (Blynk.connected()) {
+    Blynk.virtualWrite(V0, accX);
+    Blynk.virtualWrite(V1, accY);
+    Blynk.virtualWrite(V2, accZ);
+    Blynk.virtualWrite(V3, totalGetaran);
+
+    // Pastikan data valid sebelum dikirim
+    if (!isnan(htuTemp) && !isnan(htuHum)) {
+      Blynk.virtualWrite(V4, htuTemp);
+      Blynk.virtualWrite(V5, htuHum);
+    }
+  }
+}
+
+// === Fungsi simpan SD ===
+void simpanSD() {
+  if (!sd_ok) return;
+  DateTime now = rtc_ok ? rtc.now() : DateTime(2000,1,1,0,0,0);
+  char tanggal[11], waktu[9];
+  sprintf(tanggal, "%02d/%02d/%04d", now.day(), now.month(), now.year());
+  sprintf(waktu, "%02d:%02d:%02d", now.hour(), now.minute(), now.second());
+
+  dataFile = SD.open("/data_log.csv", FILE_APPEND);
+  if (dataFile) {
+    dataFile.printf("%s,%s,%.3f,%.3f,%.3f,%.3f,%.2f,%.2f\n",
+                    tanggal, waktu, accX, accY, accZ, totalGetaran, htuTemp, htuHum);
+    dataFile.close();
+    Serial.println("Data tersimpan ke SD!");
+  } else {
+    Serial.println("Gagal membuka file SD!");
+    sd_ok = false;
+  }
+}
+
+// === Timer Event ===
+void myTimerEvent() {
+  bacaSensor();
+  kirimBlynk();
+  kirimThingSpeak();
+  simpanSD();
+}
+
+// === Setup ===
+void setup() {
+  Serial.begin(115200);
+  Wire.begin(); // jika perlu, ubah ke Wire.begin(SDA, SCL);
+  initLED();
+
+  Serial.println("\n=== Inisialisasi Sistem ===");
+  initMPU();
+  initRTC();
+  initHTU();
+  initSD();
+
+  WiFi.mode(WIFI_STA);
+  WiFiManager wm;
+  wm.setConfigPortalTimeout(180);
+  bool res = wm.autoConnect("MARLONG7.0", "jhody060105");
+
+  if (!res) {
+    Serial.println("Gagal konek ke WiFi / timeout portal!");
+  } else {
+    Serial.println("WiFi Tersambung!");
+    Serial.print("IP: "); Serial.println(WiFi.localIP());
+  }
+
+  // Tambahkan penundaan untuk memastikan koneksi aktif
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nWiFi OK!");
+
+  // Inisialisasi ThingSpeak dan Blynk setelah koneksi benar-benar stabil
+  ThingSpeak.begin(client);
+  Blynk.config(BLYNK_AUTH_TOKEN);
+
+  // Jalankan pembacaan setiap 5 detik
+  timer.setInterval(5000L, myTimerEvent);
+}
+
+// === Loop ===
+void loop() {
+  Blynk.run();
+  timer.run();
+  updateIndicators(); // panggil indikator LED terus menerus
+}
